@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: my-nodejs-app-${APELLIDO}-${ENV}
+  namespace: ${ENV}
   labels:
     app: my-nodejs-app-${APELLIDO}-${ENV}
 spec:
@@ -16,7 +17,7 @@ spec:
     spec:
       containers:
         - name: my-nodejs-app-${APELLIDO}-${ENV}
-          image: acrglobalcicd.azurecr.io/my-nodejs-app-${APELLIDO}:${IMAGE_TAG}
+          image: ${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${IMAGE_TAG}
           ports:
             - containerPort: 80
           env:
@@ -48,6 +49,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: my-nodejs-service-${APELLIDO}-${ENV}
+  namespace: ${ENV}
 spec:
   selector:
     app: my-nodejs-app-${APELLIDO}-${ENV}

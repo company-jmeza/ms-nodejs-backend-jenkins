@@ -1,0 +1,135 @@
+pipeline {
+    agent {
+        docker {
+            image 'devops-agent:latest'
+            args '-v /var/run/docker.sock:/var/run/docker.sock'
+        }
+    }
+
+    environment {
+        APELLIDO = 'jmeza'
+        ACR_NAME = 'acrjmeza'
+        ACR_LOGIN_SERVER = "${ACR_NAME}.azurecr.io"
+        IMAGE_NAME = "my-nodejs-app-${APELLIDO}"
+        RESOURCE_GROUP = 'rg-cicd-aks-jmeza'
+        AKS_NAME = 'aks-jmeza-westus'
+    }
+
+    stages {
+        stage('Hello world') {
+            steps {
+                script {
+                    env.VARIABLE = 'demo123'
+                }
+                sh '''
+                    echo ">>> Impresion Hello world"
+                    echo "Hello world"
+                    echo "Variable declarada en script: $VARIABLE"
+                    echo "Variable declarada en environment: $APELLIDO"
+                '''
+                sh '''
+                    echo ">>> Versiones instaladas:"
+                    node -v
+                    npm -v
+                    docker --version
+                    az version
+                '''
+            }
+        }
+
+        stage('Azure Login') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'azure-clientId', variable: 'AZ_CLIENT_ID'),
+                    string(credentialsId: 'azure-clientSecret', variable: 'AZ_CLIENT_SECRET'),
+                    string(credentialsId: 'azure-tenantId', variable: 'AZ_TENANT_ID'),
+                    string(credentialsId: 'azure-subscriptionId', variable: 'AZ_SUBSCRIPTION_ID')
+                ]) {
+                    sh '''
+                        echo ">>> Azure login..."
+                        az login --service-principal \
+                          --username "$AZ_CLIENT_ID" \
+                          --password "$AZ_CLIENT_SECRET" \
+                          --tenant "$AZ_TENANT_ID" \
+                          --output none
+                        az account set --subscription "$AZ_SUBSCRIPTION_ID"
+                    '''
+                }
+            }
+        }
+
+        stage('AKS Credentials') {
+            steps {
+                sh '''
+                    echo ">>> Obteniendo credenciales de AKS..."
+                    az aks get-credentials \
+                      --resource-group "$RESOURCE_GROUP" \
+                      --name "$AKS_NAME" \
+                      --overwrite-existing
+                '''
+            }
+        }
+
+        stage('[CI] Get Git Commit Short SHA') {
+            steps {
+                script {
+                    env.IMAGE_TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    echo "IMAGE_TAG generado: ${env.IMAGE_TAG}"
+                }
+            }
+        }
+
+        stage('[CI] Build & Push to ACR') {
+            steps {
+                sh '''
+                    echo ">>> Login al ACR..."
+                    az acr login --name "$ACR_NAME"
+                    echo ">>> Build de imagen..."
+                    docker build -t "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG" .
+                    echo ">>> Push al ACR..."
+                    docker push "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
+                '''
+            }
+        }
+
+        stage('[CD-DEV] Set Image Tag in k8s.yml') {
+            steps {
+                script {
+                    env.API_PROVIDER_URL = 'https://dev.api.jmeza.local'
+                    env.ENV = 'dev'
+                }
+                sh '''
+                    echo ">>> Renderizando k8s.yml..."
+                    envsubst '${APELLIDO} ${ENV} ${ACR_LOGIN_SERVER} ${IMAGE_NAME} ${IMAGE_TAG} ${API_PROVIDER_URL}' < k8s.yml > k8s-dev.yml
+                '''
+            }
+        }
+
+        stage('[CD-DEV] Deploy to AKS') {
+            steps {
+                sh '''
+                    kubectl create namespace "$ENV" --dry-run=client -o yaml | kubectl apply -f -
+                    kubectl apply -f k8s-dev.yml
+                    kubectl rollout status --namespace "$ENV" "deployment/my-nodejs-app-$APELLIDO-$ENV" --timeout=180s
+                '''
+            }
+        }
+
+        stage('[CD-DEV] Get LoadBalancer IP') {
+            steps {
+                sh '''
+                    echo ">>> Intentando obtener IP del LoadBalancer..."
+                    SERVICE_NAME="my-nodejs-service-$APELLIDO-$ENV"
+                    for RETRY in $(seq 1 60); do
+                      LB_IP=$(kubectl get service "$SERVICE_NAME" --namespace "$ENV" --output jsonpath='{.status.loadBalancer.ingress[0].ip}')
+                      [ -n "$LB_IP" ] && break
+                      echo "Intento $RETRY/60: IP aun no asignada, esperando 5s..."
+                      sleep 5
+                    done
+                    [ -n "$LB_IP" ] || exit 1
+                    echo ">>> IP del LoadBalancer asignada: $LB_IP"
+                '''
+            }
+        }
+    }
+}
